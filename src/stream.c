@@ -164,6 +164,50 @@ static int emit_access_unit(struct media_stream *st, const uint8_t *nal, size_t 
     return 0;
 }
 
+/* 1 读到新字节，0 文件正常结束，-1 读失败或缓冲无法继续。 */
+static int file_read_more(FILE *fp, uint8_t **buf, size_t *len, size_t *cap)
+{
+    size_t nread;
+
+    if (*len == *cap) {
+        if (*cap < RTS_MAX_NAL) {
+            size_t ncap = *cap * 2;
+            uint8_t *nbuf;
+            if (ncap > RTS_MAX_NAL)
+                ncap = RTS_MAX_NAL;
+            if (ncap > *cap) {
+                nbuf = (uint8_t *)realloc(*buf, ncap);
+                if (!nbuf)
+                    return -1;
+                *buf = nbuf;
+                *cap = ncap;
+            }
+        }
+        if (*len == *cap) {
+            if (*len <= 4)
+                return -1;
+            memmove(*buf, *buf + *len - 4, 4);
+            *len = 4;
+        }
+    }
+    nread = fread(*buf + *len, 1, *cap - *len, fp);
+    if (nread > 0) {
+        *len += nread;
+        return 1;
+    }
+    if (ferror(fp))
+        return -1;
+    return 0;
+}
+
+static int file_rewind(FILE *fp)
+{
+    if (fseek(fp, 0, SEEK_SET) != 0)
+        return -1;
+    clearerr(fp);
+    return 0;
+}
+
 static void *file_thread(void *arg)
 {
     struct media_stream *st = (struct media_stream *)arg;
@@ -201,6 +245,7 @@ static void *file_thread(void *arg)
     while (st->running) {
         size_t off = 0;
         int emitted = 0;
+        int rd;
         while (st->running) {
             const uint8_t *nal = NULL;
             size_t nlen = 0;
@@ -219,29 +264,14 @@ static void *file_thread(void *arg)
         }
         if (!st->running)
             break;
-        if (len == cap) {
-            if (cap < RTS_MAX_NAL) {
-                size_t ncap = cap * 2;
-                uint8_t *nbuf;
-                if (ncap > RTS_MAX_NAL)
-                    ncap = RTS_MAX_NAL;
-                nbuf = (uint8_t *)realloc(buf, ncap);
-                if (nbuf) {
-                    buf = nbuf;
-                    cap = ncap;
-                }
-            } else {
-                memmove(buf, buf + len - 4, 4);
-                len = 4;
-            }
-        }
-        if (len < cap) {
-            size_t nread = fread(buf + len, 1, cap - len, fp);
-            if (nread > 0) {
-                len += nread;
-                continue;
-            }
-        }
+
+        rd = file_read_more(fp, &buf, &len, &cap);
+        if (rd > 0)
+            continue;
+        if (rd < 0)
+            break;
+
+        /* 确认是文件结束，不是缓冲刚好读满。把最后一个 NALU 送出后回到开头。 */
         {
             const uint8_t *nal = NULL;
             size_t nlen = 0;
@@ -253,8 +283,9 @@ static void *file_thread(void *arg)
             }
         }
         len = 0;
-        if (fseek(fp, 0, SEEK_SET) != 0)
+        if (file_rewind(fp) != 0)
             break;
+        rtsps_log("file rewind %s", st->name);
         if (!emitted) {
             struct timespec ts;
             ts.tv_sec = 0;
