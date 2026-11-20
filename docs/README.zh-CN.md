@@ -11,9 +11,9 @@
 - 在一个 IPv4 TCP 端口上监听，按名字发布流，例如 `rtsp://127.0.0.1:8554/live`。
 - 循环读取 Annex-B H.264 文件，或者由调用方通过 `RTSPServer_InputFrame` 送入 NALU。
 - 应答 `OPTIONS`、`DESCRIBE`、`SETUP`、`PLAY`、`PAUSE`、`TEARDOWN`、`GET_PARAMETER` 和 `HEARTBEAT`。
-- 发送 H.264 RTP。`SETUP` 选择 TCP 交织或 UDP。每个会话有自己的序号和 SSRC。
+- 发送 H.264 RTP。`SETUP` 选择 TCP 交织、单播 UDP 或组播。每个会话有自己的序号和 SSRC。
 
-`DESCRIBE` 之前的 `SETUP` 会被拒绝。传输头里有 `interleaved=` 时，RTP 走这条 RTSP 连接。单播 `client_port` 走 UDP，`200` 里的 `server_port` 是 `RTSPServer_InitLib` 端口池中的一对偶数端口。组播，以及没有 `interleaved` 的 `RTP/AVP/TCP`，应答 `461`。
+`DESCRIBE` 之前的 `SETUP` 会被拒绝。传输头里有 `interleaved=` 时，RTP 走这条 RTSP 连接。单播 `client_port` 走 UDP，`200` 里的 `server_port` 是 `RTSPServer_InitLib` 端口池中的一对偶数端口。`RTP/AVP;multicast` 把这一路只发一份到 `239.1.1.1`。偶数端口来自同一个端口池，`200` 写成 `destination=239.1.1.1;port=<偶数>-<奇数>;ttl=16`。同一路流后来的组播观众复用这个地址，不再另开一份发送。大约每 5 秒向奇数端口写一个 RTCP 发送者报告。没有 `interleaved` 的 `RTP/AVP/TCP` 仍然应答 `461`。
 
 `RTSPServer_InputFrame` 把 NALU 拷进队列后返回。调用方的指针只在这次调用期间被读取。某个会话的队列满了，就丢掉最旧的一帧。超过 512 KiB 的 NALU 直接拒绝。
 
@@ -60,7 +60,7 @@ lib/linux64/demo 8554 live sample/testsrc_320x240_30s.h264 25
 3. accept 线程为每条连接起一个线程，最多八条。读套接字的是这条线程。
 4. `DESCRIBE` 用 URL 路径的第一段选定流，并返回 SDP。`SETUP` 记下传输方式。`PLAY` 让这个会话订阅该流。
 5. 文件线程或 `RTSPServer_InputFrame` 把每个 NALU 送进直通过滤器。过滤器把同一个 NALU 交给所有订阅者。
-6. 会话线程打包 RTP 并写出。TCP 的形式是 `$`、通道号和 16 位长度。UDP 用 `sendto` 发到 RTSP 对端地址和客户端的 RTP 端口。
+6. 会话线程打包 RTP 并写出。TCP 的形式是 `$`、通道号和 16 位长度。UDP 用 `sendto` 发到 RTSP 对端地址和客户端的 RTP 端口。组播用 `sendto` 发到 `239.1.1.1` 和应答里的端口，并把 RTCP 发送者报告写到下一个端口。
 7. `TEARDOWN` 先回 `200`，然后会话线程退出。`RTSPServer_Stop` 停掉 accept、全部会话和文件线程。`RTSPServer_Destroy` 会先停掉仍在监听的服务，再释放它。`RTSPServer_FiniLib` 销毁还活着的服务，并释放端口池。
 
 ## 架构
@@ -151,7 +151,7 @@ tests/check.c             本机检查切分、FU-A 和 SDP
 - 超过 512 KiB 的 NALU 被丢掉。RTP 载荷最多 1400 字节，更大的 NALU 用 FU-A。负载类型是 96，时钟是 90000。
 - 文件读取把一个 VCL NALU 当成一帧。一帧里有多个 slice 时，每个 slice 都会占一次节拍。
 - 只有 IPv4。没有鉴权、音频、H.265，也不解封装容器。
-- 不发送 RTCP SR。交织通道上的奇数通道，以及 UDP 的 RTCP 套接字，收到的数据被丢掉。
+- 组播会发送 RTCP 发送者报告。单播 UDP 和 TCP 交织不发送。交织通道上的奇数通道，以及单播 UDP 的 RTCP 套接字，收到的数据被丢掉。
 - `AddStream` 只记下 `fps`，不会给 `InputFrame` 节拍。时间戳用调用方传入的 `pts90k`。
 - 流名字不能含有 `/` 或空格。文件路径要放进 511 字节。
 - `make -C prj_linux` 在 `PLATFORM=linux64` 和 `PLATFORM=aarch64` 上都跑过。aarch64 这次把 `CROSS_COMPILE` 设成 VES 构建所用的 RK3568 gcc 前缀。这条路径不在本仓库里。`lib/aarch64/demo` 是 ARM aarch64 可执行文件。没有 Windows 构建。

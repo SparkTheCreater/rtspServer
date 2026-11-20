@@ -11,9 +11,9 @@ The tree does not contain a player, a decoder, or a container demuxer.
 - Listen on one IPv4 TCP port and publish named streams, for example `rtsp://127.0.0.1:8554/live`.
 - Read an Annex-B H.264 file in a loop, or accept NAL units from the caller through `RTSPServer_InputFrame`.
 - Answer `OPTIONS`, `DESCRIBE`, `SETUP`, `PLAY`, `PAUSE`, `TEARDOWN`, `GET_PARAMETER`, and `HEARTBEAT`.
-- Send H.264 RTP. `SETUP` chooses TCP interleaved or UDP. Each session has its own sequence number and SSRC.
+- Send H.264 RTP. `SETUP` chooses TCP interleaved, unicast UDP, or multicast. Each session has its own sequence number and SSRC.
 
-`SETUP` before `DESCRIBE` is rejected. A transport with `interleaved=` uses the RTSP connection. A unicast `client_port` uses UDP, and the `200` includes `server_port` as an even pair from the pool passed to `RTSPServer_InitLib`. Multicast, and `RTP/AVP/TCP` without `interleaved`, get `461`.
+`SETUP` before `DESCRIBE` is rejected. A transport with `interleaved=` uses the RTSP connection. A unicast `client_port` uses UDP, and the `200` includes `server_port` as an even pair from the pool passed to `RTSPServer_InitLib`. `RTP/AVP;multicast` is sent once per stream to `239.1.1.1`. The even port comes from that same pool, and the `200` is `destination=239.1.1.1;port=<even>-<odd>;ttl=16`. A second multicast viewer of the same stream reuses that address and does not start another sender. About every 5 seconds the sender writes an RTCP sender report to the odd port. `RTP/AVP/TCP` without `interleaved` still gets `461`.
 
 `RTSPServer_InputFrame` copies the NAL and returns. The pointer is only needed for that call. A full per-session queue drops the oldest frame. A NAL larger than 512 KiB is rejected.
 
@@ -60,7 +60,7 @@ lib/linux64/demo 8554 live sample/testsrc_320x240_30s.h264 25
 3. The accept thread starts one thread per connection, up to eight. That thread reads the socket.
 4. `DESCRIBE` selects the stream from the first URL path segment and returns SDP. `SETUP` stores the transport. `PLAY` subscribes the session to the stream.
 5. The file thread, or `RTSPServer_InputFrame`, pushes each NAL through the copy filter. The filter emits the same NAL to every subscriber.
-6. The session thread packs RTP and writes it. TCP uses `$`, channel, and a 16-bit length. UDP uses `sendto` toward the RTSP peer address and the client's RTP port.
+6. The session thread packs RTP and writes it. TCP uses `$`, channel, and a 16-bit length. UDP uses `sendto` toward the RTSP peer address and the client's RTP port. Multicast uses `sendto` toward `239.1.1.1` and the announced port, and writes RTCP sender reports to the next port.
 7. `TEARDOWN` sends `200` and the session thread exits. `RTSPServer_Stop` stops accept, sessions, and file threads. `RTSPServer_Destroy` stops a server that is still running, then frees it. `RTSPServer_FiniLib` destroys any server still alive and frees the port pool.
 
 ## Architecture
@@ -151,7 +151,7 @@ tests/check.c             host checks for split, FU-A, and SDP
 - A NAL above 512 KiB is dropped. RTP payload is at most 1400 bytes. A larger NAL is sent as FU-A. Payload type is 96 and the clock is 90000.
 - The file reader treats one VCL NAL as one frame. A frame made of several slices is paced once per slice.
 - IPv4 only. There is no authentication, audio, H.265, or container demux.
-- No RTCP sender reports. RTCP received on the interleaved odd channel, or on the UDP RTCP socket, is discarded.
+- Multicast sends RTCP sender reports. Unicast UDP and TCP interleaved do not. RTCP received on the interleaved odd channel, or on a unicast UDP RTCP socket, is discarded.
 - `AddStream` records `fps` and does not pace `InputFrame`. The caller supplies `pts90k`.
 - A stream name cannot contain `/` or a space. The path length must fit in 511 bytes.
 - `make -C prj_linux` was run for `PLATFORM=linux64` and for `PLATFORM=aarch64`. The aarch64 build sets `CROSS_COMPILE` to the RK3568 gcc prefix used by the VES build. That path is not stored in this repository. `lib/aarch64/demo` is an ARM aarch64 executable. There is no Windows build.
