@@ -48,10 +48,10 @@ make -C prj_linux PLATFORM=aarch64 CROSS_COMPILE=aarch64-linux-gnu-
 示例是 [`demo/linux64/src/main.c`](../demo/linux64/src/main.c)。它调用 `RTSPServer_InitLib`、`RTSPServer_Create`、`RTSPServer_AddFileStream` 和 `RTSPServer_Start`，然后等到 `SIGINT` 或 `SIGTERM`。
 
 ```bash
-lib/linux64/demo 8554 live sample.h264 25
+lib/linux64/demo 8554 live sample/testsrc_320x240_30s.h264 25
 ```
 
-这个文件里的 `InitLib` 使用 UDP 端口 30000 到 30500。进程会打印 `rtsp://127.0.0.1:8554/live`。
+[`sample/testsrc_320x240_30s.h264`](../sample/testsrc_320x240_30s.h264) 是一份 30 秒的 Annex-B H.264，用 ffmpeg 的 `testsrc` 编成：320x240、25 fps、没有 B 帧。示例里的 `InitLib` 使用 UDP 端口 30000 到 30500。进程会打印 `rtsp://127.0.0.1:8554/live`。
 
 ## 实现原理
 

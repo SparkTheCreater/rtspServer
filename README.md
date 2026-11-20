@@ -48,10 +48,10 @@ make -C prj_linux PLATFORM=aarch64 CROSS_COMPILE=aarch64-linux-gnu-
 The sample is [`demo/linux64/src/main.c`](demo/linux64/src/main.c). It calls `RTSPServer_InitLib`, `RTSPServer_Create`, `RTSPServer_AddFileStream`, and `RTSPServer_Start`, then waits for `SIGINT` or `SIGTERM`.
 
 ```bash
-lib/linux64/demo 8554 live sample.h264 25
+lib/linux64/demo 8554 live sample/testsrc_320x240_30s.h264 25
 ```
 
-`InitLib` in that file uses UDP ports 30000 through 30500. The process prints `rtsp://127.0.0.1:8554/live`.
+[`sample/testsrc_320x240_30s.h264`](sample/testsrc_320x240_30s.h264) is a 30-second Annex-B H.264 file made with ffmpeg `testsrc`: 320x240, 25 fps, no B frames. `InitLib` in the demo uses UDP ports 30000 through 30500. The process prints `rtsp://127.0.0.1:8554/live`.
 
 ## How it works
 
