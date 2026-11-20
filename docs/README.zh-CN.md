@@ -154,4 +154,4 @@ tests/check.c             本机检查切分、FU-A 和 SDP
 - 不发送 RTCP SR。交织通道上的奇数通道，以及 UDP 的 RTCP 套接字，收到的数据被丢掉。
 - `AddStream` 只记下 `fps`，不会给 `InputFrame` 节拍。时间戳用调用方传入的 `pts90k`。
 - 流名字不能含有 `/` 或空格。文件路径要放进 511 字节。
-- `make -C prj_linux` 只在 `PLATFORM=linux64` 上跑过。`CROSS_COMPILE` 那条没有跑过。没有 Windows 构建。
+- `make -C prj_linux` 在 `PLATFORM=linux64` 和 `PLATFORM=aarch64` 上都跑过。aarch64 这次把 `CROSS_COMPILE` 设成 VES 构建所用的 RK3568 gcc 前缀。这条路径不在本仓库里。`lib/aarch64/demo` 是 ARM aarch64 可执行文件。没有 Windows 构建。

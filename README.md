@@ -154,4 +154,4 @@ tests/check.c             host checks for split, FU-A, and SDP
 - No RTCP sender reports. RTCP received on the interleaved odd channel, or on the UDP RTCP socket, is discarded.
 - `AddStream` records `fps` and does not pace `InputFrame`. The caller supplies `pts90k`.
 - A stream name cannot contain `/` or a space. The path length must fit in 511 bytes.
-- `make -C prj_linux` was run for `PLATFORM=linux64`. The `CROSS_COMPILE` line was not run. There is no Windows build.
+- `make -C prj_linux` was run for `PLATFORM=linux64` and for `PLATFORM=aarch64`. The aarch64 build sets `CROSS_COMPILE` to the RK3568 gcc prefix used by the VES build. That path is not stored in this repository. `lib/aarch64/demo` is an ARM aarch64 executable. There is no Windows build.
