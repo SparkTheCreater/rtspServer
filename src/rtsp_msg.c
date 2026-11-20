@@ -224,7 +224,7 @@ int rtsp_transport_kind(const char *transport)
     if (strcasestr(transport, "interleaved="))
         return RTSP_TP_TCP;
     if (strcasestr(transport, "multicast"))
-        return -1;
+        return RTSP_TP_MCAST;
     if (strcasestr(transport, "RTP/AVP/TCP"))
         return -1;
     if (strcasestr(transport, "client_port="))
@@ -271,6 +271,19 @@ int rtsp_format_udp_transport(char *out, size_t cap, int c0, int c1, int s0, int
     int n = snprintf(out, cap,
                      "RTP/AVP;unicast;client_port=%d-%d;server_port=%d-%d",
                      c0, c1, s0, s1);
+    if (n < 0 || (size_t)n >= cap)
+        return -1;
+    return 0;
+}
+
+int rtsp_format_mcast_transport(char *out, size_t cap, const char *addr, int port, int ttl)
+{
+    int n;
+    if (!out || !addr || port <= 0 || port >= 65535)
+        return -1;
+    n = snprintf(out, cap,
+                 "RTP/AVP;multicast;destination=%s;port=%d-%d;ttl=%d",
+                 addr, port, port + 1, ttl);
     if (n < 0 || (size_t)n >= cap)
         return -1;
     return 0;

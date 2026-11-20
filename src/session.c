@@ -40,6 +40,8 @@ struct frame_queue {
     pthread_mutex_t mu;
 };
 
+struct mcast_tx;
+
 struct transport_ops {
     const char *name;
     int (*send_rtp)(struct rtsp_session *s, const uint8_t *pkt, size_t len);
@@ -70,6 +72,8 @@ struct rtsp_session {
     int client_rtp;
     struct sockaddr_in udp_peer;
     struct rtp_state rtp;
+    int mcast_passive;
+    struct mcast_tx *mtx;
     struct frame_queue q;
     uint8_t *split;
     size_t split_len;
@@ -194,6 +198,233 @@ static int udp_send_rtp(struct rtsp_session *s, const uint8_t *pkt, size_t len)
 static const struct transport_ops g_tcp_ops = { "tcp", tcp_send_rtp };
 static const struct transport_ops g_udp_ops = { "udp", udp_send_rtp };
 
+#define MCAST_ADDR "239.1.1.1"
+#define MCAST_TTL 16
+
+struct mcast_tx {
+    int used;
+    struct media_stream *stream;
+    int rtp_fd;
+    int rtcp_fd;
+    unsigned short port;
+    struct sockaddr_in rtp_dst;
+    struct sockaddr_in rtcp_dst;
+    int refs;
+    struct rtsp_session *owner;
+    uint32_t pkt_count;
+    uint32_t octet_count;
+    uint32_t last_ts;
+    uint64_t first_rtp_ms;
+    uint64_t last_sr_ms;
+};
+
+static struct mcast_tx g_mcast[RTS_MAX_STREAMS];
+static pthread_mutex_t g_mcast_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static uint64_t mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+static int open_mcast_sock(void)
+{
+    int fd;
+    int ttl = MCAST_TTL;
+    int loop = 1;
+    int on = 1;
+    struct sockaddr_in addr;
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+    setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    io_set_nonblock(fd);
+    return fd;
+}
+
+static void mcast_fill_dst(struct mcast_tx *tx)
+{
+    memset(&tx->rtp_dst, 0, sizeof(tx->rtp_dst));
+    memset(&tx->rtcp_dst, 0, sizeof(tx->rtcp_dst));
+    tx->rtp_dst.sin_family = AF_INET;
+    tx->rtcp_dst.sin_family = AF_INET;
+    inet_pton(AF_INET, MCAST_ADDR, &tx->rtp_dst.sin_addr);
+    tx->rtcp_dst.sin_addr = tx->rtp_dst.sin_addr;
+    tx->rtp_dst.sin_port = htons(tx->port);
+    tx->rtcp_dst.sin_port = htons((unsigned short)(tx->port + 1));
+}
+
+static void mcast_free_unlocked(struct mcast_tx *tx)
+{
+    if (tx->rtp_fd >= 0)
+        close(tx->rtp_fd);
+    if (tx->rtcp_fd >= 0)
+        close(tx->rtcp_fd);
+    if (tx->port)
+        port_pool_free(tx->port);
+    memset(tx, 0, sizeof(*tx));
+    tx->rtp_fd = -1;
+    tx->rtcp_fd = -1;
+}
+
+static struct mcast_tx *mcast_attach(struct media_stream *st, struct rtsp_session *s, int *is_owner)
+{
+    struct mcast_tx *tx = NULL;
+    int i;
+
+    *is_owner = 0;
+    pthread_mutex_lock(&g_mcast_mu);
+    for (i = 0; i < RTS_MAX_STREAMS; i++) {
+        if (g_mcast[i].used && g_mcast[i].stream == st) {
+            tx = &g_mcast[i];
+            break;
+        }
+    }
+    if (!tx) {
+        for (i = 0; i < RTS_MAX_STREAMS; i++) {
+            if (!g_mcast[i].used) {
+                tx = &g_mcast[i];
+                break;
+            }
+        }
+        if (!tx) {
+            pthread_mutex_unlock(&g_mcast_mu);
+            return NULL;
+        }
+        memset(tx, 0, sizeof(*tx));
+        tx->rtp_fd = -1;
+        tx->rtcp_fd = -1;
+        if (port_pool_alloc(&tx->port) != 0) {
+            pthread_mutex_unlock(&g_mcast_mu);
+            return NULL;
+        }
+        tx->rtp_fd = open_mcast_sock();
+        tx->rtcp_fd = open_mcast_sock();
+        if (tx->rtp_fd < 0 || tx->rtcp_fd < 0) {
+            mcast_free_unlocked(tx);
+            pthread_mutex_unlock(&g_mcast_mu);
+            return NULL;
+        }
+        mcast_fill_dst(tx);
+        tx->stream = st;
+        tx->used = 1;
+    }
+    tx->refs++;
+    if (!tx->owner) {
+        tx->owner = s;
+        *is_owner = 1;
+    }
+    pthread_mutex_unlock(&g_mcast_mu);
+    return tx;
+}
+
+static void mcast_detach(struct rtsp_session *s)
+{
+    struct mcast_tx *tx = s->mtx;
+    if (!tx)
+        return;
+    pthread_mutex_lock(&g_mcast_mu);
+    if (tx->owner == s)
+        tx->owner = NULL;
+    tx->refs--;
+    if (tx->refs <= 0)
+        mcast_free_unlocked(tx);
+    pthread_mutex_unlock(&g_mcast_mu);
+    s->mtx = NULL;
+    s->mcast_passive = 0;
+}
+
+static int mcast_send_rtp(struct rtsp_session *s, const uint8_t *pkt, size_t len)
+{
+    struct mcast_tx *tx = s->mtx;
+    ssize_t n;
+    if (!tx || s->mcast_passive || tx->rtp_fd < 0)
+        return s->mcast_passive ? 0 : -1;
+    n = sendto(tx->rtp_fd, pkt, len, MSG_NOSIGNAL,
+               (struct sockaddr *)&tx->rtp_dst, sizeof(tx->rtp_dst));
+    if (n != (ssize_t)len)
+        return -1;
+    tx->pkt_count++;
+    if (len > 12)
+        tx->octet_count += (uint32_t)(len - 12);
+    if (len >= 12) {
+        tx->last_ts = ((uint32_t)pkt[4] << 24) | ((uint32_t)pkt[5] << 16) |
+                      ((uint32_t)pkt[6] << 8) | (uint32_t)pkt[7];
+    }
+    if (tx->first_rtp_ms == 0)
+        tx->first_rtp_ms = mono_ms();
+    return 0;
+}
+
+static void put_be32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+static void mcast_send_sr(struct rtsp_session *s)
+{
+    struct mcast_tx *tx = s->mtx;
+    uint8_t sr[28];
+    struct timespec ts;
+    uint32_t ntp_sec;
+    uint32_t ntp_frac;
+    ssize_t n;
+
+    if (!tx || tx->rtcp_fd < 0 || tx->pkt_count == 0)
+        return;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ntp_sec = (uint32_t)ts.tv_sec + 2208988800u;
+    ntp_frac = (uint32_t)(((uint64_t)ts.tv_nsec << 32) / 1000000000ull);
+    memset(sr, 0, sizeof(sr));
+    sr[0] = 0x80;
+    sr[1] = 200;
+    sr[2] = 0;
+    sr[3] = 6;
+    put_be32(sr + 4, s->rtp.ssrc);
+    put_be32(sr + 8, ntp_sec);
+    put_be32(sr + 12, ntp_frac);
+    put_be32(sr + 16, tx->last_ts);
+    put_be32(sr + 20, tx->pkt_count);
+    put_be32(sr + 24, tx->octet_count);
+    n = sendto(tx->rtcp_fd, sr, sizeof(sr), MSG_NOSIGNAL,
+               (struct sockaddr *)&tx->rtcp_dst, sizeof(tx->rtcp_dst));
+    if (n == (ssize_t)sizeof(sr))
+        tx->last_sr_ms = mono_ms();
+}
+
+static void mcast_maybe_sr(struct rtsp_session *s)
+{
+    struct mcast_tx *tx = s->mtx;
+    uint64_t now;
+    if (!tx || s->mcast_passive || tx->pkt_count == 0)
+        return;
+    now = mono_ms();
+    if (tx->last_sr_ms == 0) {
+        if (tx->first_rtp_ms == 0 || now - tx->first_rtp_ms < 5000)
+            return;
+    } else if (now - tx->last_sr_ms < 5000) {
+        return;
+    }
+    mcast_send_sr(s);
+}
+
+static const struct transport_ops g_mcast_ops = { "mcast", mcast_send_rtp };
+
 struct send_ctx {
     struct rtsp_session *s;
     int err;
@@ -226,6 +457,7 @@ static void session_close_media(struct rtsp_session *s)
         stream_unsubscribe(s->stream, s);
         s->subscribed = 0;
     }
+    mcast_detach(s);
     if (s->udp_rtp >= 0) {
         close(s->udp_rtp);
         s->udp_rtp = -1;
@@ -411,7 +643,19 @@ static int on_setup(struct rtsp_session *s, const struct rtsp_request *req)
     if (s->session_id == 0)
         s->session_id = next_sid();
 
-    if (kind == RTSP_TP_TCP) {
+    if (kind == RTSP_TP_MCAST) {
+        int is_owner = 0;
+        struct mcast_tx *tx = mcast_attach(s->stream, s, &is_owner);
+        if (!tx)
+            return reply_code(s, req, 500);
+        s->mtx = tx;
+        s->mcast_passive = is_owner ? 0 : 1;
+        s->transport = RTSP_TP_MCAST;
+        s->ops = &g_mcast_ops;
+        if (rtsp_format_mcast_transport(transport, sizeof(transport),
+                                        MCAST_ADDR, tx->port, MCAST_TTL) != 0)
+            return reply_code(s, req, 500);
+    } else if (kind == RTSP_TP_TCP) {
         int a = 0;
         int b = 0;
         if (rtsp_parse_port_pair(req->transport, "interleaved", &a, &b) != 0 ||
@@ -466,7 +710,9 @@ static int on_play(struct rtsp_session *s, const struct rtsp_request *req)
     gen = s->stream_gen;
     pthread_mutex_unlock(&s->mu);
 
-    if (!s->subscribed) {
+    if (s->mcast_passive) {
+        rc = 0;
+    } else if (!s->subscribed) {
         rc = stream_subscribe(st, gen, session_on_frame, s);
         pthread_mutex_lock(&s->mu);
         if (rc == 0 && s->stream == st && s->stream_gen == gen)
@@ -704,6 +950,8 @@ static void *session_main(void *arg)
             break;
         if (s->state == ST_PLAYING && s->paused)
             fq_flush(&s->q);
+        if (s->state == ST_PLAYING && !s->paused)
+            mcast_maybe_sr(s);
         if (s->state != ST_PLAYING || s->paused || !s->ops)
             continue;
         {

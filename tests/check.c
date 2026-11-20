@@ -117,6 +117,11 @@ static void test_sdp_and_transport(void)
     expect(strstr(sdp, "a=control:trackID=0") != NULL, "control");
     expect(rtsp_format_udp_transport(udp, sizeof(udp), 16000, 16001, 30000, 30001) == 0, "udp fmt");
     expect(strstr(udp, "server_port=30000-30001") != NULL, "server_port hyphen");
+    expect(rtsp_transport_kind("RTP/AVP;multicast") == RTSP_TP_MCAST, "mcast kind");
+    expect(rtsp_transport_kind("RTP/AVP/TCP;unicast;client_port=1-2") < 0, "bare tcp rejected");
+    expect(rtsp_format_mcast_transport(udp, sizeof(udp), "239.1.1.1", 30000, 16) == 0, "mcast fmt");
+    expect(strstr(udp, "destination=239.1.1.1") != NULL, "mcast destination");
+    expect(strstr(udp, "port=30000-30001") != NULL, "mcast port");
     rtsp_stream_name("rtsp://127.0.0.1:18554/live/trackID=0", name, sizeof(name));
     expect(strcmp(name, "live") == 0, "stream name");
 }
